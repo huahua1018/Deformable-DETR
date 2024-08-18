@@ -139,7 +139,7 @@ def convert(xml_files, json_file):
 
 if __name__ == "__main__":
     #change to your VOC path
-    voc_path = "data/VOC2012"
+    voc_path = "data/VOC2012_trainval"
     
     # change to your output_path
     save_coco_path = "data/VOC2COCO"
@@ -147,8 +147,8 @@ if __name__ == "__main__":
     #  VOC just split train.txt and val.txt
     data_type_list = ["train", "val"]
     for data_type in data_type_list:
-        os.makedirs(os.path.join(save_coco_path, data_type+"2017"))
-        os.makedirs(os.path.join(save_coco_path, data_type+"_xml"))
+        os.makedirs(os.path.join(save_coco_path, data_type+"2017",exist_ok=True))
+        os.makedirs(os.path.join(save_coco_path, data_type+"_xml", exist_ok=True))
         with open(os.path.join(voc_path, "ImageSets/Main", data_type+".txt"), "r") as f:
             txt_ls = f.readlines()
         txt_ls = [i.strip() for i in txt_ls]
