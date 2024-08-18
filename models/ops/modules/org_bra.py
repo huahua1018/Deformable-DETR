@@ -144,7 +144,7 @@ class BiLevelRoutingAttention(nn.Module):
     def __init__(self, dim, num_heads=8, n_win=7, qk_dim=None, qk_scale=None,
                  kv_per_win=4, kv_downsample_ratio=4, kv_downsample_kernel=None, kv_downsample_mode='identity',
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=False, side_dwconv=3,
-                 auto_pad=False):
+                 auto_pad=True):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -262,7 +262,6 @@ class BiLevelRoutingAttention(nn.Module):
             assert H%self.n_win == 0 and W%self.n_win == 0 #
         ###################################################
 
-
         # patchify, (n, p^2, w, w, c), keep 2d window as we need 2d pooling to reduce kv size
         ''' 
         H 拆成 j(S)*h(H/S), W 拆成 i(S)*w(W/S) ，然後變成 (n, S^2, h, w, c)
@@ -364,6 +363,7 @@ class BiLevelRoutingAttention(nn.Module):
         if self.auto_pad and (pad_r > 0 or pad_b > 0):
             out = out[:, :H_in, :W_in, :].contiguous()
 
+        ''' output 大小和 input 一樣 '''
         if ret_attn_mask:
             return out, r_weight, r_idx, attn_weight
         else:

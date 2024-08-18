@@ -17,7 +17,7 @@ from torch import nn, Tensor
 from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 
 from util.misc import inverse_sigmoid
-from models.ops.modules import BiLevelRoutingAttention
+from models.ops.modules import BiLevelRoutingAttention, MSDeformAttn
 
 from einops import rearrange
 
@@ -161,7 +161,8 @@ class DeformableTransformer(nn.Module):
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
 
         # encoder
-        memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
+        memory = self.encoder(src_flatten, spatial_shapes, lvl_pos_embed_flatten)
+        print("memory: ",memory.shape)
 
         # prepare input for decoder
         bs, _, c = memory.shape
@@ -187,6 +188,7 @@ class DeformableTransformer(nn.Module):
             reference_points = self.reference_points(query_embed).sigmoid()
             init_reference_out = reference_points
 
+        print("tgt: ",tgt.shape)
         # decoder
         hs, inter_references = self.decoder(tgt, reference_points, memory,
                                             spatial_shapes, level_start_index, valid_ratios, query_embed, mask_flatten)
@@ -242,21 +244,19 @@ class BRATransformerEncoderLayer(nn.Module):
         for (H, W) in input_spatial_shapes:
             # 计算该尺度的面积
             area = H * W
-            
             # 从展平的输入中取出这个尺度的部分，并恢复二维形状
             x_level = x[:, start_idx:start_idx + area, :]
             x_level = x_level.view(B, H, W, C)
             output = self.self_attn(x_level)
-            output = output.view(B, -1, C)
+            output = output.view(B, area, C)
             outputs.append(output)
             # 更新指针
             start_idx += area
-
         # 将所有输出结合起来，例如通过拼接
         final_output = torch.cat(outputs, dim=1)  # 或根据需求改变结合方式
         return final_output
 
-    def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None):
+    def forward(self, src, pos, spatial_shapes):
         # self attention
 
         src2 = self.multi_scale_patchify_and_apply_BRA(self.with_pos_embed(src, pos), spatial_shapes)
@@ -290,11 +290,11 @@ class BRATransformerEncoder(nn.Module):
         reference_points = reference_points[:, :, None] * valid_ratios[:, None]
         return reference_points
 
-    def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
+    def forward(self, src, spatial_shapes, pos=None):
         output = src
-        reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
+        # reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         for _, layer in enumerate(self.layers):
-            output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
+            output = layer(output, pos, spatial_shapes)
 
         return output
 
@@ -306,7 +306,8 @@ class BRATransformerDecoderLayer(nn.Module):
         super().__init__()
 
         # cross attention
-        self.cross_attn = BiLevelRoutingAttention(d_model, num_heads=n_heads, topk=n_points)
+        # self.cross_attn = BiLevelRoutingAttention(d_model, num_heads=n_heads, topk=n_points)
+        self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -344,10 +345,16 @@ class BRATransformerDecoderLayer(nn.Module):
         # 初始化一个指针来遍历展平的输入
         start_idx = 0
 
+        tp=0
+        for (H, W) in input_spatial_shapes:
+            tp+=H*W
+        print("tp: ",tp)
+        print("L: ",L)
+
         for (H, W) in input_spatial_shapes:
             # 计算该尺度的面积
             area = H * W
-            
+            print(area)
             # 从展平的输入中取出这个尺度的部分，并恢复二维形状
             x_level = x[:, start_idx:start_idx + area, :]
             x_level = x_level.view(B, H, W, C)
@@ -370,7 +377,10 @@ class BRATransformerDecoderLayer(nn.Module):
         tgt = self.norm2(tgt)
 
         # cross attention
-        tgt2 = self.multi_scale_patchify_and_apply_BRA(self.with_pos_embed(tgt, query_pos),src_spatial_shapes)
+        # tgt2 = self.multi_scale_patchify_and_apply_BRA(self.with_pos_embed(tgt, query_pos),src_spatial_shapes)
+        tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos),
+                               reference_points,
+                               src, src_spatial_shapes, level_start_index, src_padding_mask)
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
