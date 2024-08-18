@@ -1,0 +1,4 @@
+# ninja log v6
+0	4093	1723874643063148517	/home/huahua/Final_project/Deformable-DETR/models/ops/build/temp.linux-x86_64-cpython-37/home/huahua/Final_project/Deformable-DETR/models/ops/src/cpu/ms_deform_attn_cpu.o	cac2b57e573479d0
+0	13026	1723874643063148517	/home/huahua/Final_project/Deformable-DETR/models/ops/build/temp.linux-x86_64-cpython-37/home/huahua/Final_project/Deformable-DETR/models/ops/src/cuda/ms_deform_attn_cuda.o	f94ef33d35dfb7e6
+0	13624	1723874643063148517	/home/huahua/Final_project/Deformable-DETR/models/ops/build/temp.linux-x86_64-cpython-37/home/huahua/Final_project/Deformable-DETR/models/ops/src/vision.o	207ce57d81f93139

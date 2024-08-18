@@ -17,8 +17,9 @@ from torch import nn, Tensor
 from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 
 from util.misc import inverse_sigmoid
-from models.ops.modules import MSDeformAttn
+from models.ops.modules import BiLevelRoutingAttention
 
+from einops import rearrange
 
 class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8,
@@ -33,15 +34,15 @@ class DeformableTransformer(nn.Module):
         self.two_stage = two_stage
         self.two_stage_num_proposals = two_stage_num_proposals
 
-        encoder_layer = DeformableTransformerEncoderLayer(d_model, dim_feedforward,
+        encoder_layer = BRATransformerEncoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
                                                           num_feature_levels, nhead, enc_n_points)
-        self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers)
+        self.encoder = BRATransformerEncoder(encoder_layer, num_encoder_layers)
 
-        decoder_layer = DeformableTransformerDecoderLayer(d_model, dim_feedforward,
+        decoder_layer = BRATransformerDecoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
                                                           num_feature_levels, nhead, dec_n_points)
-        self.decoder = DeformableTransformerDecoder(decoder_layer, num_decoder_layers, return_intermediate_dec)
+        self.decoder = BRATransformerDecoder(decoder_layer, num_decoder_layers, return_intermediate_dec)
 
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
 
@@ -59,9 +60,12 @@ class DeformableTransformer(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-        for m in self.modules():
-            if isinstance(m, MSDeformAttn):
-                m._reset_parameters()
+        
+        '''  不初始化   '''
+        # for m in self.modules():
+        #     if isinstance(m, MSDeformAttn):
+        #         m._reset_parameters()
+
         if not self.two_stage:
             xavier_uniform_(self.reference_points.weight.data, gain=1.0)
             constant_(self.reference_points.bias.data, 0.)
@@ -132,16 +136,23 @@ class DeformableTransformer(nn.Module):
         lvl_pos_embed_flatten = []
         spatial_shapes = []
         for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
-            bs, c, h, w = src.shape
+            bs, c, h, w = src.shape # (batch_size, channels, height, width)
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
-            src = src.flatten(2).transpose(1, 2)
-            mask = mask.flatten(1)
+            ''' 
+            src: (batch_size, height * width, channels) 
+            mask: (batch_size, height, width)
+            pos_embed: (batch_size, height * width, channels)
+            '''
+            src = src.flatten(2).transpose(1, 2) 
+            mask = mask.flatten(1) 
             pos_embed = pos_embed.flatten(2).transpose(1, 2)
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
+
+        
         src_flatten = torch.cat(src_flatten, 1)
         mask_flatten = torch.cat(mask_flatten, 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
@@ -186,7 +197,7 @@ class DeformableTransformer(nn.Module):
         return hs, init_reference_out, inter_references_out, None, None
 
 
-class DeformableTransformerEncoderLayer(nn.Module):
+class BRATransformerEncoderLayer(nn.Module):
     def __init__(self,
                  d_model=256, d_ffn=1024,
                  dropout=0.1, activation="relu",
@@ -194,7 +205,8 @@ class DeformableTransformerEncoderLayer(nn.Module):
         super().__init__()
 
         # self attention
-        self.self_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
+        # self.self_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
+        self.self_attn = BiLevelRoutingAttention(d_model, num_heads=n_heads, topk=n_points)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -216,9 +228,38 @@ class DeformableTransformerEncoderLayer(nn.Module):
         src = self.norm2(src)
         return src
 
+    def multi_scale_patchify_and_apply_BRA(self, x, input_spatial_shapes):
+        """
+        x: (N, L, C) -> 原始展平的多尺度特征
+        spatial_shapes: 每个尺度的空间形状，例如 [(H1, W1), (H2, W2), ...]
+        """
+        B, L, C = x.shape
+        outputs = []
+
+        # 初始化一个指针来遍历展平的输入
+        start_idx = 0
+
+        for (H, W) in input_spatial_shapes:
+            # 计算该尺度的面积
+            area = H * W
+            
+            # 从展平的输入中取出这个尺度的部分，并恢复二维形状
+            x_level = x[:, start_idx:start_idx + area, :]
+            x_level = x_level.view(B, H, W, C)
+            output = self.self_attn(x_level)
+            output = output.view(B, -1, C)
+            outputs.append(output)
+            # 更新指针
+            start_idx += area
+
+        # 将所有输出结合起来，例如通过拼接
+        final_output = torch.cat(outputs, dim=1)  # 或根据需求改变结合方式
+        return final_output
+
     def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None):
         # self attention
-        src2 = self.self_attn(self.with_pos_embed(src, pos), reference_points, src, spatial_shapes, level_start_index, padding_mask)
+
+        src2 = self.multi_scale_patchify_and_apply_BRA(self.with_pos_embed(src, pos), spatial_shapes)
         src = src + self.dropout1(src2)
         src = self.norm1(src)
 
@@ -228,7 +269,7 @@ class DeformableTransformerEncoderLayer(nn.Module):
         return src
 
 
-class DeformableTransformerEncoder(nn.Module):
+class BRATransformerEncoder(nn.Module):
     def __init__(self, encoder_layer, num_layers):
         super().__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
@@ -258,14 +299,14 @@ class DeformableTransformerEncoder(nn.Module):
         return output
 
 
-class DeformableTransformerDecoderLayer(nn.Module):
+class BRATransformerDecoderLayer(nn.Module):
     def __init__(self, d_model=256, d_ffn=1024,
                  dropout=0.1, activation="relu",
                  n_levels=4, n_heads=8, n_points=4):
         super().__init__()
 
         # cross attention
-        self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
+        self.cross_attn = BiLevelRoutingAttention(d_model, num_heads=n_heads, topk=n_points)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -292,6 +333,35 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt = self.norm3(tgt)
         return tgt
 
+    def multi_scale_patchify_and_apply_BRA(self, x, input_spatial_shapes):
+        """
+        x: (N, L, C) -> 原始展平的多尺度特征
+        spatial_shapes: 每个尺度的空间形状，例如 [(H1, W1), (H2, W2), ...]
+        """
+        B, L, C = x.shape
+        outputs = []
+
+        # 初始化一个指针来遍历展平的输入
+        start_idx = 0
+
+        for (H, W) in input_spatial_shapes:
+            # 计算该尺度的面积
+            area = H * W
+            
+            # 从展平的输入中取出这个尺度的部分，并恢复二维形状
+            x_level = x[:, start_idx:start_idx + area, :]
+            x_level = x_level.view(B, H, W, C)
+            
+            output = self.cross_attn(x_level)
+            output = output.view(B, -1, C)
+            outputs.append(output)
+            # 更新指针
+            start_idx += area
+
+        # 将所有输出结合起来，例如通过拼接
+        final_output = torch.cat(outputs, dim=1)  # 或根据需求改变结合方式
+        return final_output
+    
     def forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None):
         # self attention
         q = k = self.with_pos_embed(tgt, query_pos)
@@ -300,9 +370,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt = self.norm2(tgt)
 
         # cross attention
-        tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos),
-                               reference_points,
-                               src, src_spatial_shapes, level_start_index, src_padding_mask)
+        tgt2 = self.multi_scale_patchify_and_apply_BRA(self.with_pos_embed(tgt, query_pos),src_spatial_shapes)
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
@@ -312,7 +380,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         return tgt
 
 
-class DeformableTransformerDecoder(nn.Module):
+class BRATransformerDecoder(nn.Module):
     def __init__(self, decoder_layer, num_layers, return_intermediate=False):
         super().__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
